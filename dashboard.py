@@ -1,105 +1,88 @@
-# dashboard.py (Final Robust Version)
+# dashboard.py (Final Version with Corrected Parsing Logic)
 import streamlit as st
 import pandas as pd
 import requests
 from datetime import datetime
 
 # --- Page Configuration ---
-st.set_page_config(
-    page_title="Project AURA Sentinel",
-    page_icon="🛰️",
-    layout="wide"
-)
+st.set_page_config(page_title="Project AURA Sentinel", page_icon="🛰️", layout="wide")
 
-# --- Data Fetching Functions ---
-URL_KP_INDEX = "https://services.swpc.noaa.gov/products/noaa-planetary-k-index-forecast.json"
-URL_SOLAR_WIND = "https://services.swpc.noaa.gov/products/ace-real-time-solar-wind.json"
+# --- Data Sources ---
+URL_KP_INDEX = "https://services.swpc.noaa.gov/products/noaa-planetary-k-index.json"
+URL_SOLAR_WIND = "https://services.swpc.noaa.gov/products/solar-wind/plasma-2-hour.json"
+URL_GOES_FLARE = "https://services.swpc.noaa.gov/products/goes-x-ray-flux-5-minute.json"
+URL_SDO_IMAGE = "https://sdo.gsfc.nasa.gov/assets/img/latest/latest_512_HMIIC.jpg"
 
-@st.cache_data(ttl=900) # Cache data for 15 minutes
+@st.cache_data(ttl=600) # Cache data for 10 minutes
 def get_data():
     """Fetches all data and returns it in a dictionary."""
-    data = {'kp_index': None, 'wind_speed': None, 'bz_gsm': None, 'timestamp': datetime.now()}
-    
-    # --- NEW: More robust Kp-index fetching ---
-    try:
-        kp_response = requests.get(URL_KP_INDEX).json()[1:]
-        kp_df = pd.DataFrame(kp_response, columns=['valid_utc', 'observed_kp', 'kp_forecast', 'kp_noise'])
-        
-        # Iterate backwards to find the most recent valid forecast
-        for index, row in kp_df.iloc[::-1].iterrows():
-            try:
-                # Try to convert the forecast to a number
-                latest_kp = int(row['kp_forecast'])
-                data['kp_index'] = latest_kp
-                break # Stop as soon as we find a valid number
-            except (ValueError, TypeError):
-                # If it fails (e.g., it's the word "predicted"), just continue to the next row
-                continue
-                
-    except Exception as e:
-        # If the whole request fails, we'll see this error
-        st.error(f"Error fetching Kp-index data: {e}")
+    data = {'kp_index': None, 'wind_speed': None, 'flare_class': None, 'flare_flux_series': None, 'timestamp': datetime.now()}
 
-    # --- NEW: More robust Solar Wind fetching ---
     try:
-        wind_response = requests.get(URL_SOLAR_WIND).json()[1:]
-        wind_df = pd.DataFrame(wind_response, columns=['time_tag', 'density', 'speed', 'temperature', 'bt', 'bz_gsm'])
-        latest_wind = wind_df.iloc[-1]
-        data['wind_speed'] = float(latest_wind['speed'])
-        data['bz_gsm'] = float(latest_wind['bz_gsm'])
-    except Exception as e:
-        st.error(f"Error fetching Solar Wind data: {e}")
-        
+        kp_response = requests.get(URL_KP_INDEX).json()
+        # THE FIX IS HERE: Use 'Kp' with a capital K to match the real header
+        kp_df = pd.DataFrame(kp_response[1:], columns=kp_response[0])
+        kp_df['Kp'] = pd.to_numeric(kp_df['Kp'], errors='coerce')
+        kp_df.dropna(subset=['Kp'], inplace=True)
+        data['kp_index'] = int(kp_df.iloc[-1]['Kp'])
+    except Exception: st.warning("Could not retrieve live Kp-index data.")
+
+    try:
+        wind_response = requests.get(URL_SOLAR_WIND).json()
+        wind_df = pd.DataFrame(wind_response[1:], columns=wind_response[0])
+        wind_df['speed'] = pd.to_numeric(wind_df['speed'], errors='coerce')
+        wind_df.dropna(subset=['speed'], inplace=True)
+        data['wind_speed'] = wind_df.iloc[-1]['speed']
+    except Exception: st.warning("Could not retrieve live Solar Wind data.")
+
+    try:
+        flare_response = requests.get(URL_GOES_FLARE).json()
+        flare_df = pd.DataFrame(flare_response[1:], columns=flare_response[0])
+        flare_df['flux'] = pd.to_numeric(flare_df['flux'], errors='coerce')
+        flare_df.dropna(subset=['flux'], inplace=True)
+        flare_df['time_tag'] = pd.to_datetime(flare_df['time_tag'])
+        flare_df.set_index('time_tag', inplace=True)
+        latest_flux = flare_df['flux'].iloc[-1]
+        def classify_flare(flux):
+            if flux < 1e-8: return f"A{(flux / 1e-9):.1f}"
+            if flux < 1e-7: return f"B{(flux / 1e-8):.1f}"
+            if flux < 1e-6: return f"C{(flux / 1e-7):.1f}"
+            if flux < 1e-5: return f"M{(flux / 1e-6):.1f}"
+            if flux >= 1e-5: return f"X{(flux / 1e-5):.1f}"
+        data['flare_class'] = classify_flare(latest_flux)
+        data['flare_flux_series'] = flare_df['flux']
+    except Exception: st.warning("Could not retrieve live Solar Flare data.")
+
     return data
 
 # --- Main Dashboard Page ---
 st.title(f"🛰️ Project AURA Sentinel")
-
 data = get_data()
 st.write(f"Last updated: {data.get('timestamp').strftime('%Y-%m-%d %H:%M:%S')} CEST")
 
-st.header("Geomagnetic & Solar Wind Status")
+col1, col2 = st.columns([1, 2], gap="large") 
 
-col1, col2, col3 = st.columns(3)
+with col1:
+    st.header("Live Sun")
+    st.image(URL_SDO_IMAGE, caption="SDO/HMI Continuum")
 
-# --- NEW: Display metrics only if data is available ---
+with col2:
+    st.header("Key Metrics")
+    sub_col1, sub_col2, sub_col3 = st.columns(3)
 
-# Kp-Index Metric
-kp_index = data.get('kp_index')
-if kp_index is not None:
-    kp_help = "Planetary K-index. A measure of geomagnetic storm activity. 5 or higher indicates a geomagnetic storm."
-    col1.metric(label="Planetary K-index", value=f"Kp {kp_index}", delta_color="inverse", help=kp_help)
-else:
-    col1.metric(label="Planetary K-index", value="N/A", delta_color="off")
+    kp_val = data.get('kp_index')
+    sub_col1.metric(label="Planetary K-index", value=f"Kp {kp_val}" if kp_val is not None else "N/A")
 
-# Solar Wind Speed Metric
-wind_speed = data.get('wind_speed')
-if wind_speed is not None:
-    wind_help = "Speed of the plasma flowing from the sun."
-    col2.metric(label="Solar Wind Speed", value=f"{wind_speed:.0f} km/s", help=wind_help)
-else:
-    col2.metric(label="Solar Wind Speed", value="N/A", delta_color="off")
+    wind_val = data.get('wind_speed')
+    sub_col2.metric(label="Solar Wind Speed", value=f"{wind_val:.0f} km/s" if wind_val is not None else "N/A")
 
-# IMF Bz Metric
-bz_gsm = data.get('bz_gsm')
-if bz_gsm is not None:
-    bz_delta = "Northward" if bz_gsm >= 0 else "Southward"
-    bz_help = "Interplanetary Magnetic Field (IMF) Bz component. A strong southward Bz (negative value) can lead to auroral activity."
-    col3.metric(label="IMF Bz Component", value=f"{bz_gsm:.1f} nT", delta=bz_delta, delta_color="off", help=bz_help)
-else:
-    col3.metric(label="IMF Bz Component", value="N/A", delta_color="off")
+    flare_val = data.get('flare_class')
+    sub_col3.metric(label="Max Flare Class (5m)", value=flare_val if flare_val is not None else "N/A")
 
-# --- Raw Data ---
-with st.expander("Show Raw Data Tables"):
-    st.write("Note: This data is cached and refreshes every 15 minutes.")
-    st.subheader("Geomagnetic Forecast")
-    try:
-        st.dataframe(pd.read_json(URL_KP_INDEX).iloc[1:])
-    except Exception as e:
-        st.warning("Could not load Geomagnetic Forecast table.")
-    
-    st.subheader("Real-time Solar Wind")
-    try:
-        st.dataframe(pd.read_json(URL_SOLAR_WIND).iloc[1:])
-    except Exception as e:
-        st.warning("Could not load Solar Wind table.")
+    st.text("") 
+    st.subheader("GOES X-Ray Flux (Last 2 Hours)")
+    flare_series = data.get('flare_flux_series')
+    if flare_series is not None and not flare_series.empty:
+        st.line_chart(flare_series)
+    else:
+        st.warning("Flare activity chart is currently unavailable.")
