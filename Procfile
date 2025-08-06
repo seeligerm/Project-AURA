@@ -1,1 +1,1 @@
-web: gunicorn -b :$PORT app:app
+web: streamlit run dashboard.py --server.port $PORT --server.enableCORS false
